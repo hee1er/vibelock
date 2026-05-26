@@ -30,7 +30,7 @@ object AppModule {
     @Singleton
     fun provideOkHttpClient(): OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(0, TimeUnit.SECONDS) // No timeout for WebSocket
+        .readTimeout(0, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
         .pingInterval(25, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
@@ -40,14 +40,8 @@ object AppModule {
     @Singleton
     fun provideHttpClient(okHttpClient: OkHttpClient, json: Json): HttpClient =
         HttpClient(OkHttp) {
-            engine {
-                preconfigured = okHttpClient
-            }
-            install(WebSockets) {
-                pingIntervalMillis = 25_000
-            }
-            install(ContentNegotiation) {
-                json(json)
-            }
+            engine { preconfigured = okHttpClient }
+            install(WebSockets) { pingIntervalMillis = 25_000 }
+            install(ContentNegotiation) { json(json) }
         }
 }

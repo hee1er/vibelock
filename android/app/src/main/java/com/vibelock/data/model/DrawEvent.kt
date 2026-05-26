@@ -16,6 +16,7 @@ data class JoinQueueMsg(
     override val type: String = "join_queue",
     val userId: String,
     val displayName: String,
+    val isPremium: Boolean = false,
 ) : WsMessage()
 
 @Serializable
@@ -83,6 +84,7 @@ data class DrawPath(
     val color: Long = 0xFFFFFFFF,
     val strokeWidth: Float = 8f,
     val isLocal: Boolean = true,
+    val brushType: Any? = null, // BrushType — Any to avoid circular import
 )
 
 data class DrawPoint(val x: Float, val y: Float)

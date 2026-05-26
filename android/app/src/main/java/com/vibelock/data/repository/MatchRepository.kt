@@ -25,9 +25,9 @@ class MatchRepository @Inject constructor(
 
     fun connect() = socket.connect()
 
-    fun joinQueue(userId: String, displayName: String) {
+    fun joinQueue(userId: String, displayName: String, isPremium: Boolean = false) {
         _matchState.value = MatchState.Searching()
-        socket.sendRaw(json.encodeToString(JoinQueueMsg(userId = userId, displayName = displayName)))
+        socket.sendRaw(json.encodeToString(JoinQueueMsg(userId = userId, displayName = displayName, isPremium = isPremium)))
     }
 
     fun sendDrawStart(x: Float, y: Float, color: String, strokeWidth: Float) {

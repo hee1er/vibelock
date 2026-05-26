@@ -1,11 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- Network -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-
-    <!-- Lock screen overlay (API 26+) -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
@@ -13,9 +10,10 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
-
-    <!-- Disable battery optimization request -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
+    <!-- AdMob 광고 추적 동의 (Android 13+) -->
+    <uses-permission android:name="com.google.android.gms.permission.AD_ID" />
 
     <application
         android:name=".VibeLockApp"
@@ -27,7 +25,16 @@
         android:theme="@style/Theme.VibeLock"
         android:hardwareAccelerated="true">
 
-        <!-- Main entry -->
+        <!-- AdMob 앱 ID (테스트용 — 출시 시 실제 ID로 교체) -->
+        <meta-data
+            android:name="com.google.android.gms.ads.APPLICATION_ID"
+            android:value="ca-app-pub-3940256099942544~3347511713" />
+
+        <!-- 광고 딜레이 초기화 비활성화 (성능 최적화) -->
+        <meta-data
+            android:name="com.google.android.gms.ads.flag.OPTIMIZE_INITIALIZATION"
+            android:value="true" />
+
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -40,7 +47,6 @@
             </intent-filter>
         </activity>
 
-        <!-- Lock screen drawing overlay activity -->
         <activity
             android:name=".LockScreenActivity"
             android:exported="false"
@@ -52,7 +58,6 @@
             android:excludeFromRecents="true"
             android:theme="@style/Theme.VibeLock.LockScreen" />
 
-        <!-- Foreground service for persistent WebSocket + lock screen -->
         <service
             android:name=".service.VibeLockService"
             android:exported="false"

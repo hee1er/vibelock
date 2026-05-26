@@ -7,39 +7,50 @@ import { getRandomWord } from './words'
 const PORT = parseInt(process.env.PORT ?? '3001')
 
 const app = express()
-app.get('/health', (_, res) => res.json({ ok: true, connections: clients.size }))
+app.use(express.json())
+app.get('/health', (_, res) => res.json({
+  ok: true,
+  connections: clients.size,
+  queue: queue.length,
+  premiumQueue: premiumQueue.length,
+  rooms: rooms.size,
+}))
 
 const server = createServer(app)
 const wss = new WebSocketServer({ server, path: '/ws' })
 
-// ── State ─────────────────────────────────────────────────────────────────────
+// ── 상태 ────────────────────────────────────────────────────────────────────
 
 interface Client {
   ws: WebSocket
+  socketId: string
   userId: string
   displayName: string
+  isPremium: boolean
   roomId: string | null
+  connectedAt: Date
 }
 
-const clients = new Map<string, Client>()   // socketId → Client
-const queue: string[] = []                   // socketIds waiting for match
+const clients = new Map<string, Client>()
+const premiumQueue: string[] = []   // 프리미엄 우선 대기열
+const queue: string[] = []          // 일반 대기열
 
 interface Room {
   id: string
-  player1: string  // socketId
-  player2: string  // socketId
+  player1: string
+  player2: string
   word: string
   drawerSocketId: string
+  round: number
+  createdAt: Date
 }
 
 const rooms = new Map<string, Room>()
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// ── 헬퍼 ─────────────────────────────────────────────────────────────────────
 
 function send(ws: WebSocket, payload: object) {
-  if (ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify(payload))
-  }
+  if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(payload))
 }
 
 function getPartner(socketId: string): Client | null {
@@ -51,149 +62,181 @@ function getPartner(socketId: string): Client | null {
   return clients.get(partnerId) ?? null
 }
 
-function removeFromQueue(socketId: string) {
-  const idx = queue.indexOf(socketId)
-  if (idx !== -1) queue.splice(idx, 1)
+function removeFromQueues(socketId: string) {
+  const pi = premiumQueue.indexOf(socketId)
+  if (pi !== -1) premiumQueue.splice(pi, 1)
+  const qi = queue.indexOf(socketId)
+  if (qi !== -1) queue.splice(qi, 1)
 }
 
+function broadcastQueueUpdate() {
+  const total = premiumQueue.length + queue.length
+  ;[...premiumQueue, ...queue].forEach((sid) => {
+    const c = clients.get(sid)
+    if (c) send(c.ws, { type: 'queue_update', queueSize: total })
+  })
+}
+
+/**
+ * 매칭 시도:
+ * 1) 프리미엄 ↔ 프리미엄
+ * 2) 프리미엄 ↔ 일반
+ * 3) 일반 ↔ 일반
+ */
 function tryMatch() {
-  while (queue.length >= 2) {
-    const id1 = queue.shift()!
-    const id2 = queue.shift()!
+  // 두 큐를 합쳐서 처리 (프리미엄 우선)
+  const combined = [...premiumQueue, ...queue]
+
+  while (combined.length >= 2) {
+    const id1 = combined.shift()!
+    const id2 = combined.shift()!
     const c1 = clients.get(id1)
     const c2 = clients.get(id2)
-    if (!c1 || !c2) continue  // stale — try next pair
+
+    if (!c1 || !c2) continue
+
+    // 실제 큐에서 제거
+    removeFromQueues(id1)
+    removeFromQueues(id2)
 
     const roomId = uuid()
     const word = getRandomWord()
-    const room: Room = { id: roomId, player1: id1, player2: id2, word, drawerSocketId: id1 }
+    const room: Room = {
+      id: roomId, player1: id1, player2: id2,
+      word, drawerSocketId: id1, round: 1,
+      createdAt: new Date(),
+    }
     rooms.set(roomId, room)
     c1.roomId = roomId
     c2.roomId = roomId
 
-    send(c1.ws, {
-      type: 'matched',
-      roomId,
-      role: 'drawer',
-      word,
-      partnerName: c2.displayName,
-    })
-    send(c2.ws, {
-      type: 'matched',
-      roomId,
-      role: 'guesser',
-      partnerName: c1.displayName,
-    })
+    send(c1.ws, { type: 'matched', roomId, role: 'drawer', word, partnerName: c2.displayName, isPremiumMatch: c1.isPremium && c2.isPremium })
+    send(c2.ws, { type: 'matched', roomId, role: 'guesser', partnerName: c1.displayName, isPremiumMatch: c1.isPremium && c2.isPremium })
 
-    console.log(`[room] ${roomId}: "${c1.displayName}" (drawer) + "${c2.displayName}" (guesser) — word: "${word}"`)
+    const tag = `[${c1.isPremium ? '⭐' : ''}${c1.displayName}] ↔ [${c2.isPremium ? '⭐' : ''}${c2.displayName}]`
+    console.log(`[match] Room ${roomId.slice(0, 8)} — ${tag} — 단어: "${word}"`)
   }
 
-  // Notify remaining waiter of queue size
-  if (queue.length > 0) {
-    const waiter = clients.get(queue[0])
-    if (waiter) send(waiter.ws, { type: 'queue_update', queueSize: queue.length })
-  }
+  broadcastQueueUpdate()
 }
 
 function leaveRoom(socketId: string) {
   const client = clients.get(socketId)
   if (!client?.roomId) return
+  const room = rooms.get(client.roomId)
   const partner = getPartner(socketId)
+
   if (partner) {
     send(partner.ws, { type: 'partner_disconnected' })
     partner.roomId = null
-    // Re-queue partner
-    queue.push(partner.userId ? socketId : '')
+    // 파트너를 적절한 대기열로 재진입
+    if (partner.isPremium) premiumQueue.push(partner.socketId)
+    else queue.push(partner.socketId)
   }
-  rooms.delete(client.roomId)
+
+  if (room) rooms.delete(room.id)
   client.roomId = null
 }
 
-// ── WebSocket handler ─────────────────────────────────────────────────────────
+// ── WebSocket 핸들러 ──────────────────────────────────────────────────────────
 
 wss.on('connection', (ws) => {
   const socketId = uuid()
-  const client: Client = { ws, userId: '', displayName: 'Anonymous', roomId: null }
+  const client: Client = {
+    ws, socketId, userId: '', displayName: 'Anonymous',
+    isPremium: false, roomId: null, connectedAt: new Date(),
+  }
   clients.set(socketId, client)
-  console.log(`[connect] ${socketId} (total: ${clients.size})`)
+  send(ws, { type: 'connected', socketId })
+  console.log(`[connect] ${socketId.slice(0, 8)} (총: ${clients.size}명)`)
 
   ws.on('message', (raw) => {
     let msg: any
     try { msg = JSON.parse(raw.toString()) } catch { return }
 
     switch (msg.type) {
+
+      // ── 매칭 대기열 진입 ────────────────────────────────────────
       case 'join_queue': {
         client.userId = msg.userId ?? uuid()
         client.displayName = (msg.displayName ?? 'Anonymous').slice(0, 24)
-        removeFromQueue(socketId)
-        if (!client.roomId) {
-          queue.push(socketId)
-          tryMatch()
-        }
+        client.isPremium = msg.isPremium === true
+
+        // 이미 방에 있으면 먼저 나가기
+        if (client.roomId) leaveRoom(socketId)
+        removeFromQueues(socketId)
+
+        // 프리미엄은 앞쪽 대기열
+        if (client.isPremium) premiumQueue.unshift(socketId)
+        else queue.push(socketId)
+
+        console.log(`[queue] ${client.displayName}${client.isPremium ? ' ⭐' : ''} 대기 (P:${premiumQueue.length}/N:${queue.length})`)
+        tryMatch()
         break
       }
 
+      // ── 그림 이벤트 릴레이 ──────────────────────────────────────
       case 'draw_start':
       case 'draw_move':
       case 'draw_end': {
         const partner = getPartner(socketId)
         if (!partner) break
-        const partnerType = msg.type.replace('draw_', 'partner_draw_')
-        send(partner.ws, { type: partnerType, x: msg.x, y: msg.y, color: msg.color, strokeWidth: msg.strokeWidth })
+        send(partner.ws, {
+          type: `partner_${msg.type}`,
+          x: msg.x, y: msg.y, color: msg.color, strokeWidth: msg.strokeWidth,
+        })
         break
       }
 
       case 'clear': {
-        const partner = getPartner(socketId)
-        if (partner) send(partner.ws, { type: 'partner_clear' })
+        getPartner(socketId)?.let(p => send(p.ws, { type: 'partner_clear' }))
         break
       }
 
+      // ── 정답 체크 ─────────────────────────────────────────────
       case 'guess': {
         const room = rooms.get(client.roomId ?? '')
         if (!room) break
-        const answer = (msg.word ?? '').trim().toLowerCase()
-        const correct = answer === room.word.toLowerCase()
+        const answer = (msg.word ?? '').trim()
+        const correct = answer.toLowerCase() === room.word.toLowerCase()
+
         send(ws, { type: correct ? 'correct_guess' : 'wrong_guess', word: msg.word, correct })
+
         if (correct) {
           const partner = getPartner(socketId)
           if (partner) send(partner.ws, { type: 'correct_guess', word: msg.word, correct: true })
-          // Start new round
+
+          // 2초 후 새 라운드: 역할 교체 + 새 단어
           const newWord = getRandomWord()
           room.word = newWord
-          // Swap roles
-          const newDrawer = room.drawerSocketId === room.player1 ? room.player2 : room.player1
-          room.drawerSocketId = newDrawer
-          const c1 = clients.get(room.player1)
-          const c2 = clients.get(room.player2)
-          if (c1 && c2) {
-            setTimeout(() => {
-              send(c1.ws, {
-                type: 'new_round',
-                role: room.player1 === newDrawer ? 'drawer' : 'guesser',
-                word: room.player1 === newDrawer ? newWord : undefined,
-              })
-              send(c2.ws, {
-                type: 'new_round',
-                role: room.player2 === newDrawer ? 'drawer' : 'guesser',
-                word: room.player2 === newDrawer ? newWord : undefined,
-              })
-            }, 2000)
-          }
+          room.round++
+          room.drawerSocketId = room.drawerSocketId === room.player1 ? room.player2 : room.player1
+
+          setTimeout(() => {
+            const c1 = clients.get(room.player1)
+            const c2 = clients.get(room.player2)
+            if (c1 && c2) {
+              const drawer = room.drawerSocketId
+              send(c1.ws, { type: 'new_round', round: room.round, role: room.player1 === drawer ? 'drawer' : 'guesser', word: room.player1 === drawer ? newWord : undefined })
+              send(c2.ws, { type: 'new_round', round: room.round, role: room.player2 === drawer ? 'drawer' : 'guesser', word: room.player2 === drawer ? newWord : undefined })
+            }
+          }, 2000)
         }
         break
       }
 
+      // ── 스킵 ──────────────────────────────────────────────────
       case 'skip': {
         const partner = getPartner(socketId)
         if (partner) {
           send(partner.ws, { type: 'partner_skipped' })
           partner.roomId = null
-          // Re-queue partner
-          queue.push([...clients.entries()].find(([, c]) => c === partner)?.[0] ?? '')
+          if (partner.isPremium) premiumQueue.unshift(partner.socketId)
+          else queue.push(partner.socketId)
         }
         leaveRoom(socketId)
-        queue.push(socketId)
+        if (client.isPremium) premiumQueue.unshift(socketId)
+        else queue.push(socketId)
         tryMatch()
         break
       }
@@ -206,16 +249,27 @@ wss.on('connection', (ws) => {
 
   ws.on('close', () => {
     leaveRoom(socketId)
-    removeFromQueue(socketId)
+    removeFromQueues(socketId)
     clients.delete(socketId)
-    console.log(`[disconnect] ${socketId} (total: ${clients.size})`)
+    console.log(`[disconnect] ${socketId.slice(0, 8)} (총: ${clients.size}명)`)
+    broadcastQueueUpdate()
   })
 
-  ws.on('error', (err) => console.error(`[error] ${socketId}:`, err.message))
-
-  send(ws, { type: 'connected', socketId })
+  ws.on('error', (err) => console.error(`[error] ${socketId.slice(0, 8)}:`, err.message))
 })
 
+// TypeScript 헬퍼
+declare global {
+  interface Object { let<T, R>(this: T, fn: (v: T) => R): R }
+}
+Object.prototype.let = function<T, R>(this: T, fn: (v: T) => R) { return fn(this) }
+
 server.listen(PORT, () => {
-  console.log(`VibeLock server running on ws://localhost:${PORT}/ws`)
+  console.log(`
+  ╔══════════════════════════════════════╗
+  ║   VibeLock Server v1.0               ║
+  ║   ws://localhost:${PORT}/ws           ║
+  ║   http://localhost:${PORT}/health    ║
+  ╚══════════════════════════════════════╝
+  `)
 })
